@@ -1,7 +1,6 @@
 import jetnet
 from jetnet.datasets import JetNet
 from jetnet import evaluation
-from jetnet.datasets.normalisations import FeaturewiseLinearBounded, FeaturewiseLinear
 
 import setup_training
 from mpgan import augment, mask_manual
@@ -32,18 +31,6 @@ def main():
     args.device = device
     logging.info("Args initalized")
 
-    # as used for arXiv:2106.11535
-    feature_maxes = JetNet.fpnd_norm.feature_maxes
-    if args.mask:
-        feature_maxes = feature_maxes + [1]
-
-    particle_norm = FeaturewiseLinearBounded(
-        feature_norms=1.0,
-        feature_shifts=[0.0, 0.0, -0.5, -0.5] if args.mask else [0.0, 0.0, -0.5],
-        feature_maxes=feature_maxes,
-    )
-    jet_norm = FeaturewiseLinear(feature_scales=1.0 / args.num_hits)
-
     data_args = {
         "jet_type": args.jets,
         "data_dir": args.datasets_path,
@@ -51,27 +38,16 @@ def main():
         "particle_features": JetNet.all_particle_features
         if args.mask
         else JetNet.all_particle_features[:-1],
-        "jet_features": "num_particles"
-        if (args.clabels or args.mask_c or args.gapt_mask)
-        else None,
-        "particle_normalisation": particle_norm,
-        "jet_normalisation": jet_norm,
+        "jet_features": "num_particles" if (args.clabels or args.mask_c) else None,
         "split_fraction": [args.ttsplit, 1 - args.ttsplit, 0],
     }
 
     X_train = JetNet(**data_args, split="train")
     X_train_loaded = DataLoader(X_train, shuffle=True, batch_size=args.batch_size, pin_memory=True)
 
-    print(particle_norm.feature_maxes)
-
     X_test = JetNet(**data_args, split="valid")
     X_test_loaded = DataLoader(X_test, batch_size=args.batch_size, pin_memory=True)
-    logging.info(f"Data loaded \n X_train \n {X_train} \n X_test \n {X_test}")
-
-    print(particle_norm.feature_maxes)
-
-    # print(torch.max(X_train.view(-1, 30 * 4), axis=0))
-    # print(torch.max(X_test.view(-1, 30 * 4), axis=0))
+    logging.info("Data loaded")
 
     G, D = setup_training.models(args)
     model_train_args, model_eval_args, extra_args = setup_training.get_model_args(args)
@@ -128,8 +104,6 @@ def get_gen_noise(
                     model_args["latent_node_size"],
                 )
             )
-    elif model == "gapt":
-        noise = dist.sample((num_samples, num_particles, model_args["embed_dim"]))
     elif model == "rgan" or model == "graphcnngan":
         noise = dist.sample((num_samples, model_args["latent_dim"]))
     elif model == "treegan":
@@ -249,7 +223,6 @@ def gen_multi_batch(
 
     if labels is not None:
         assert labels.shape[0] == num_samples, "number of labels doesn't match num_samples"
-        labels = Tensor(labels)
 
     gen_data = None
 
@@ -555,7 +528,6 @@ def evaluate(
 ):
     """Calculate evaluation metrics using the JetNet library and add them to the losses dict"""
 
-    print(real_jets.shape)
     if "w1p" in losses:
         w1pm, w1pstd = evaluation.w1p(
             real_jets,
@@ -719,12 +691,9 @@ def eval_save_plot(
     D.eval()
     save_models(D, G, D_optimizer, G_optimizer, args.models_path, epoch, multi_gpu=args.multi_gpu)
 
-    use_mask = args.mask_c or args.clabels or args.gapt_mask
-
-    real_jets = jetnet.utils.gen_jet_corrections(
+    real_jets, real_mask = jetnet.utils.gen_jet_corrections(
         X_test.particle_normalisation(X_test.particle_data[: args.eval_tot_samples], inverse=True),
         zero_mask_particles=False,
-        ret_mask_separate=use_mask,
         zero_neg_pt=False,
     )
 
@@ -737,24 +706,16 @@ def eval_save_plot(
         out_device="cpu",
         model=args.model,
         detach=True,
-        labels=X_test.jet_data[: args.eval_tot_samples] if use_mask else None,
+        labels=X_test.jet_data[: args.eval_tot_samples] if (args.mask_c or args.clabels) else None,
         **extra_args,
     )
-
-    gen_jets = jetnet.utils.gen_jet_corrections(
+    gen_jets, gen_mask = jetnet.utils.gen_jet_corrections(
         X_test.particle_normalisation(gen_output, inverse=True),
-        ret_mask_separate=use_mask,
-        zero_mask_particles=use_mask,
     )
 
-    if use_mask:
-        gen_mask = gen_jets[1]
-        gen_jets = gen_jets[0]
-        real_mask = real_jets[1]
-        real_jets = real_jets[0]
-    else:
-        gen_mask = None
-        real_mask = None
+    real_jets = real_jets.numpy()
+    if real_mask is not None:
+        real_mask = real_mask.numpy()
 
     gen_jets = gen_jets.numpy()
     if gen_mask is not None:
@@ -828,9 +789,7 @@ def train_loop(
     for batch_ndx, data in tqdm(
         enumerate(X_train_loaded), total=lenX, mininterval=0.1, desc=f"Epoch {epoch}"
     ):
-        labels = (
-            data[1].to(args.device) if (args.clabels or args.mask_c or args.gapt_mask) else None
-        )
+        labels = data[1].to(args.device) if (args.clabels or args.mask_c) else None
         data = data[0].to(args.device)
 
         if args.model == "pcgan":

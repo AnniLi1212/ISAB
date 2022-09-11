@@ -5,20 +5,12 @@
 !mpgan/**
 !ext_models
 !ext_models/**
-!gapt
-!gapt/**
 
 !trained_models
 !trained_models/*
 trained_models/*/**
 !trained_models/*/args.txt
 !trained_models/*/G_best_epoch.pt
-
-!datasets
-!datasets/*.py
-
-!mnist
-!mnist/**
 
 !*.py
 !LICENSE
